@@ -940,6 +940,13 @@ type FakeLocalParticipant struct {
 	onUpdateSubscriptionsArgsForCall []struct {
 		arg1 func(types.LocalParticipant, []livekit.TrackID, []*livekit.ParticipantTracks, bool)
 	}
+	PerformRpcStub        func(*livekit.PerformRpcRequest, chan string, chan error)
+	performRpcMutex       sync.RWMutex
+	performRpcArgsForCall []struct {
+		arg1 *livekit.PerformRpcRequest
+		arg2 chan string
+		arg3 chan error
+	}
 	ProtocolVersionStub        func() types.ProtocolVersion
 	protocolVersionMutex       sync.RWMutex
 	protocolVersionArgsForCall []struct {
@@ -1331,6 +1338,19 @@ type FakeLocalParticipant struct {
 	updateSignalingRTTMutex       sync.RWMutex
 	updateSignalingRTTArgsForCall []struct {
 		arg1 uint32
+	}
+	UpdateSubscribedAudioCodecsStub        func(livekit.NodeID, livekit.TrackID, []*livekit.SubscribedAudioCodec) error
+	updateSubscribedAudioCodecsMutex       sync.RWMutex
+	updateSubscribedAudioCodecsArgsForCall []struct {
+		arg1 livekit.NodeID
+		arg2 livekit.TrackID
+		arg3 []*livekit.SubscribedAudioCodec
+	}
+	updateSubscribedAudioCodecsReturns struct {
+		result1 error
+	}
+	updateSubscribedAudioCodecsReturnsOnCall map[int]struct {
+		result1 error
 	}
 	UpdateSubscribedQualityStub        func(livekit.NodeID, livekit.TrackID, []types.SubscribedCodecQuality) error
 	updateSubscribedQualityMutex       sync.RWMutex
@@ -6400,6 +6420,40 @@ func (fake *FakeLocalParticipant) OnUpdateSubscriptionsArgsForCall(i int) func(t
 	return argsForCall.arg1
 }
 
+func (fake *FakeLocalParticipant) PerformRpc(arg1 *livekit.PerformRpcRequest, arg2 chan string, arg3 chan error) {
+	fake.performRpcMutex.Lock()
+	fake.performRpcArgsForCall = append(fake.performRpcArgsForCall, struct {
+		arg1 *livekit.PerformRpcRequest
+		arg2 chan string
+		arg3 chan error
+	}{arg1, arg2, arg3})
+	stub := fake.PerformRpcStub
+	fake.recordInvocation("PerformRpc", []interface{}{arg1, arg2, arg3})
+	fake.performRpcMutex.Unlock()
+	if stub != nil {
+		fake.PerformRpcStub(arg1, arg2, arg3)
+	}
+}
+
+func (fake *FakeLocalParticipant) PerformRpcCallCount() int {
+	fake.performRpcMutex.RLock()
+	defer fake.performRpcMutex.RUnlock()
+	return len(fake.performRpcArgsForCall)
+}
+
+func (fake *FakeLocalParticipant) PerformRpcCalls(stub func(*livekit.PerformRpcRequest, chan string, chan error)) {
+	fake.performRpcMutex.Lock()
+	defer fake.performRpcMutex.Unlock()
+	fake.PerformRpcStub = stub
+}
+
+func (fake *FakeLocalParticipant) PerformRpcArgsForCall(i int) (*livekit.PerformRpcRequest, chan string, chan error) {
+	fake.performRpcMutex.RLock()
+	defer fake.performRpcMutex.RUnlock()
+	argsForCall := fake.performRpcArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
 func (fake *FakeLocalParticipant) ProtocolVersion() types.ProtocolVersion {
 	fake.protocolVersionMutex.Lock()
 	ret, specificReturn := fake.protocolVersionReturnsOnCall[len(fake.protocolVersionArgsForCall)]
@@ -8552,6 +8606,74 @@ func (fake *FakeLocalParticipant) UpdateSignalingRTTArgsForCall(i int) uint32 {
 	defer fake.updateSignalingRTTMutex.RUnlock()
 	argsForCall := fake.updateSignalingRTTArgsForCall[i]
 	return argsForCall.arg1
+}
+
+func (fake *FakeLocalParticipant) UpdateSubscribedAudioCodecs(arg1 livekit.NodeID, arg2 livekit.TrackID, arg3 []*livekit.SubscribedAudioCodec) error {
+	var arg3Copy []*livekit.SubscribedAudioCodec
+	if arg3 != nil {
+		arg3Copy = make([]*livekit.SubscribedAudioCodec, len(arg3))
+		copy(arg3Copy, arg3)
+	}
+	fake.updateSubscribedAudioCodecsMutex.Lock()
+	ret, specificReturn := fake.updateSubscribedAudioCodecsReturnsOnCall[len(fake.updateSubscribedAudioCodecsArgsForCall)]
+	fake.updateSubscribedAudioCodecsArgsForCall = append(fake.updateSubscribedAudioCodecsArgsForCall, struct {
+		arg1 livekit.NodeID
+		arg2 livekit.TrackID
+		arg3 []*livekit.SubscribedAudioCodec
+	}{arg1, arg2, arg3Copy})
+	stub := fake.UpdateSubscribedAudioCodecsStub
+	fakeReturns := fake.updateSubscribedAudioCodecsReturns
+	fake.recordInvocation("UpdateSubscribedAudioCodecs", []interface{}{arg1, arg2, arg3Copy})
+	fake.updateSubscribedAudioCodecsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeLocalParticipant) UpdateSubscribedAudioCodecsCallCount() int {
+	fake.updateSubscribedAudioCodecsMutex.RLock()
+	defer fake.updateSubscribedAudioCodecsMutex.RUnlock()
+	return len(fake.updateSubscribedAudioCodecsArgsForCall)
+}
+
+func (fake *FakeLocalParticipant) UpdateSubscribedAudioCodecsCalls(stub func(livekit.NodeID, livekit.TrackID, []*livekit.SubscribedAudioCodec) error) {
+	fake.updateSubscribedAudioCodecsMutex.Lock()
+	defer fake.updateSubscribedAudioCodecsMutex.Unlock()
+	fake.UpdateSubscribedAudioCodecsStub = stub
+}
+
+func (fake *FakeLocalParticipant) UpdateSubscribedAudioCodecsArgsForCall(i int) (livekit.NodeID, livekit.TrackID, []*livekit.SubscribedAudioCodec) {
+	fake.updateSubscribedAudioCodecsMutex.RLock()
+	defer fake.updateSubscribedAudioCodecsMutex.RUnlock()
+	argsForCall := fake.updateSubscribedAudioCodecsArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeLocalParticipant) UpdateSubscribedAudioCodecsReturns(result1 error) {
+	fake.updateSubscribedAudioCodecsMutex.Lock()
+	defer fake.updateSubscribedAudioCodecsMutex.Unlock()
+	fake.UpdateSubscribedAudioCodecsStub = nil
+	fake.updateSubscribedAudioCodecsReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeLocalParticipant) UpdateSubscribedAudioCodecsReturnsOnCall(i int, result1 error) {
+	fake.updateSubscribedAudioCodecsMutex.Lock()
+	defer fake.updateSubscribedAudioCodecsMutex.Unlock()
+	fake.UpdateSubscribedAudioCodecsStub = nil
+	if fake.updateSubscribedAudioCodecsReturnsOnCall == nil {
+		fake.updateSubscribedAudioCodecsReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.updateSubscribedAudioCodecsReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
 }
 
 func (fake *FakeLocalParticipant) UpdateSubscribedQuality(arg1 livekit.NodeID, arg2 livekit.TrackID, arg3 []types.SubscribedCodecQuality) error {

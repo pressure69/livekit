@@ -518,6 +518,7 @@ type LocalParticipant interface {
 	OnICEConfigChanged(callback func(participant LocalParticipant, iceConfig *livekit.ICEConfig))
 
 	UpdateSubscribedQuality(nodeID livekit.NodeID, trackID livekit.TrackID, maxQualities []SubscribedCodecQuality) error
+	UpdateSubscribedAudioCodecs(nodeID livekit.NodeID, trackID livekit.TrackID, codecs []*livekit.SubscribedAudioCodec) error
 	UpdateMediaLoss(nodeID livekit.NodeID, trackID livekit.TrackID, fractionalLoss uint32) error
 
 	// down stream bandwidth management
@@ -540,6 +541,8 @@ type LocalParticipant interface {
 	HandleLeaveRequest(reason ParticipantCloseReason)
 
 	HandleSignalMessage(msg proto.Message) error
+
+	PerformRpc(req *livekit.PerformRpcRequest, resultCh chan string, errorCh chan error)
 }
 
 // Room is a container of participants, and can provide room-level actions
@@ -627,7 +630,8 @@ type LocalMediaTrack interface {
 	SetRTT(rtt uint32)
 
 	NotifySubscriberNodeMaxQuality(nodeID livekit.NodeID, qualities []SubscribedCodecQuality)
-	ClearSubscriberNodesMaxQuality()
+	NotifySubscriptionNode(nodeID livekit.NodeID, codecs []*livekit.SubscribedAudioCodec)
+	ClearSubscriberNodes()
 	NotifySubscriberNodeMediaLoss(nodeID livekit.NodeID, fractionalLoss uint8)
 }
 

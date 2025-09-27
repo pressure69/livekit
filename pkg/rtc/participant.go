@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/frostbyte73/core"
+	"github.com/google/uuid"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/pion/rtcp"
 	"github.com/pion/sdp/v3"
@@ -46,6 +47,7 @@ import (
 	"github.com/livekit/protocol/utils"
 	"github.com/livekit/protocol/utils/guid"
 	"github.com/livekit/protocol/utils/pointer"
+	"github.com/livekit/psrpc"
 
 	"github.com/livekit/livekit-server/pkg/config"
 	"github.com/livekit/livekit-server/pkg/metric"
@@ -328,6 +330,10 @@ type ParticipantImpl struct {
 	// loggers for publisher and subscriber
 	pubLogger logger.Logger
 	subLogger logger.Logger
+
+	rpcLock             sync.Mutex
+	rpcPendingAcks      map[string]*utils.DataChannelRpcPendingAckHandler
+	rpcPendingResponses map[string]*utils.DataChannelRpcPendingResponseHandler
 }
 
 func NewParticipant(params ParticipantParams) (*ParticipantImpl, error) {
@@ -360,7 +366,9 @@ func NewParticipant(params ParticipantParams) (*ParticipantImpl, error) {
 			joiningMessageFirstSeqs:       make(map[livekit.ParticipantID]uint32),
 			joiningMessageLastWrittenSeqs: make(map[livekit.ParticipantID]uint32),
 		},
-		onClose: make(map[string]func(types.LocalParticipant)),
+		rpcPendingAcks:      make(map[string]*utils.DataChannelRpcPendingAckHandler),
+		rpcPendingResponses: make(map[string]*utils.DataChannelRpcPendingResponseHandler),
+		onClose:             make(map[string]func(types.LocalParticipant)),
 	}
 	p.setupSignalling()
 
@@ -1506,6 +1514,14 @@ func (p *ParticipantImpl) Close(sendLeave bool, reason types.ParticipantCloseRea
 
 	p.UpTrackManager.Close(isExpectedToResume)
 
+	p.rpcLock.Lock()
+	clear(p.rpcPendingAcks)
+	for _, handler := range p.rpcPendingResponses {
+		handler.Resolve("", utils.DataChannelRpcErrorFromBuiltInCodes(utils.DataChannelRpcRecipientDisconnected, ""))
+	}
+	p.rpcPendingResponses = make(map[string]*utils.DataChannelRpcPendingResponseHandler)
+	p.rpcLock.Unlock()
+
 	p.updateState(livekit.ParticipantInfo_DISCONNECTED)
 	close(p.disconnected)
 
@@ -2492,10 +2508,24 @@ func (p *ParticipantImpl) handleReceivedDataMessage(kind livekit.DataPacket_Kind
 		if payload.RpcResponse == nil {
 			return
 		}
+
+		rpcResponse := payload.RpcResponse
+		switch res := rpcResponse.Value.(type) {
+		case *livekit.RpcResponse_Payload:
+			shouldForwardData = !p.handleIncomingRpcResponse(payload.RpcResponse.GetRequestId(), res.Payload, nil)
+		case *livekit.RpcResponse_Error:
+			shouldForwardData = !p.handleIncomingRpcResponse(payload.RpcResponse.GetRequestId(), "", &utils.DataChannelRpcError{
+				Code:    utils.DataChannelRpcErrorCode(res.Error.GetCode()),
+				Message: res.Error.GetMessage(),
+				Data:    res.Error.GetData(),
+			})
+		}
 	case *livekit.DataPacket_RpcAck:
 		if payload.RpcAck == nil {
 			return
 		}
+
+		shouldForwardData = !p.handleIncomingRpcAck(payload.RpcAck.GetRequestId())
 	case *livekit.DataPacket_StreamHeader:
 		if payload.StreamHeader == nil {
 			return
@@ -2798,6 +2828,35 @@ func (p *ParticipantImpl) onSubscribedMaxQualityChange(
 	return p.sendSubscribedQualityUpdate(subscribedQualityUpdate)
 }
 
+func (p *ParticipantImpl) onSubscribedAudioCodecChange(
+	trackID livekit.TrackID,
+	codecs []*livekit.SubscribedAudioCodec,
+) error {
+	if p.params.DisableDynacast {
+		return nil
+	}
+
+	if len(codecs) == 0 {
+		return nil
+	}
+
+	// normalize the codec name
+	for _, codec := range codecs {
+		codec.Codec = strings.ToLower(strings.TrimPrefix(codec.Codec, mime.MimeTypePrefixAudio))
+	}
+
+	subscribedAudioCodecUpdate := &livekit.SubscribedAudioCodecUpdate{
+		TrackSid:              string(trackID),
+		SubscribedAudioCodecs: codecs,
+	}
+	p.pubLogger.Debugw(
+		"sending subscribed audio codec update",
+		"trackID", trackID,
+		"update", logger.Proto(subscribedAudioCodecUpdate),
+	)
+	return p.sendSubscribedAudioCodecUpdate(subscribedAudioCodecUpdate)
+}
+
 func (p *ParticipantImpl) addPendingTrackLocked(req *livekit.AddTrackRequest) *livekit.TrackInfo {
 	if req.Sid != "" {
 		track := p.GetPublishedTrack(livekit.TrackID(req.Sid))
@@ -2901,7 +2960,7 @@ func (p *ParticipantImpl) addPendingTrackLocked(req *livekit.AddTrackRequest) *l
 					mimeType = altCodec
 				}
 				if videoLayerMode == livekit.VideoLayer_MODE_UNUSED {
-					if mime.IsMimeTypeStringSVC(mimeType) {
+					if mime.IsMimeTypeStringSVCCapable(mimeType) {
 						videoLayerMode = livekit.VideoLayer_MULTIPLE_SPATIAL_LAYERS_PER_STREAM
 					} else {
 						if p.params.ClientInfo.isOBS() {
@@ -3317,6 +3376,7 @@ func (p *ParticipantImpl) addMediaTrack(signalCid string, ti *livekit.TrackInfo)
 	}, ti)
 
 	mt.OnSubscribedMaxQualityChange(p.onSubscribedMaxQualityChange)
+	mt.OnSubscribedAudioCodecChange(p.onSubscribedAudioCodecChange)
 
 	// add to published and clean up pending
 	if p.supervisor != nil {
@@ -3397,7 +3457,6 @@ func (p *ParticipantImpl) handleTrackPublished(track types.MediaTrack, isMigrate
 			p.Identity(),
 			track.ToProto(),
 		)
-
 	}
 
 	p.pendingTracksLock.Lock()
@@ -3726,6 +3785,17 @@ func (p *ParticipantImpl) UpdateSubscribedQuality(nodeID livekit.NodeID, trackID
 	return nil
 }
 
+func (p *ParticipantImpl) UpdateSubscribedAudioCodecs(nodeID livekit.NodeID, trackID livekit.TrackID, codecs []*livekit.SubscribedAudioCodec) error {
+	track := p.GetPublishedTrack(trackID)
+	if track == nil {
+		p.pubLogger.Debugw("could not find track", "trackID", trackID)
+		return errors.New("could not find published track")
+	}
+
+	track.(types.LocalMediaTrack).NotifySubscriptionNode(nodeID, codecs)
+	return nil
+}
+
 func (p *ParticipantImpl) UpdateMediaLoss(nodeID livekit.NodeID, trackID livekit.TrackID, fractionalLoss uint32) error {
 	track := p.GetPublishedTrack(trackID)
 	if track == nil {
@@ -4006,10 +4076,12 @@ func (p *ParticipantImpl) MoveToRoom(params types.MoveToRoomParams) {
 	for _, track := range p.GetPublishedTracks() {
 		for _, sub := range track.GetAllSubscribers() {
 			track.RemoveSubscriber(sub, false)
-			// clear the subscriber node max quality as the remote quality notify
-			// from source room would not reach the moving out participant.
-			track.(types.LocalMediaTrack).ClearSubscriberNodesMaxQuality()
 		}
+
+		// clear the subscriber node max quality/audio codecs as the remote quality notify
+		// from source room would not reach the moving out participant.
+		track.(types.LocalMediaTrack).ClearSubscriberNodes()
+
 		trackInfo := track.ToProto()
 		p.params.Telemetry.TrackUnpublished(
 			context.Background(),
@@ -4126,4 +4198,126 @@ func (p *ParticipantImpl) AddTransceiverFromTrackLocal(
 			RTCPFeedbackConfig{},
 		)
 	}
+}
+
+func (p *ParticipantImpl) handleIncomingRpcAck(requestId string) bool {
+	p.rpcLock.Lock()
+	defer p.rpcLock.Unlock()
+
+	handler, ok := p.rpcPendingAcks[requestId]
+	if !ok {
+		return false
+	}
+
+	handler.Resolve()
+	delete(p.rpcPendingAcks, requestId)
+	return true
+}
+
+func (p *ParticipantImpl) handleIncomingRpcResponse(requestId string, payload string, err *utils.DataChannelRpcError) bool {
+	p.rpcLock.Lock()
+	defer p.rpcLock.Unlock()
+
+	handler, ok := p.rpcPendingResponses[requestId]
+	if !ok {
+		return false
+	}
+
+	handler.Resolve(payload, err)
+	delete(p.rpcPendingResponses, requestId)
+	return true
+}
+
+func (p *ParticipantImpl) PerformRpc(req *livekit.PerformRpcRequest, resultCh chan string, errorCh chan error) {
+	responseTimeout := req.GetResponseTimeoutMs()
+	if responseTimeout <= 0 {
+		responseTimeout = uint32(utils.DataChannelRpcDefaultResponseTimeout.Milliseconds())
+	}
+
+	go func() {
+		if len([]byte(req.GetPayload())) > utils.DataChannelRpcMaxPayloadBytes {
+			errorCh <- utils.DataChannelRpcErrorFromBuiltInCodes(utils.DataChannelRpcRequestPayloadTooLarge, "").PsrpcError()
+			return
+		}
+
+		id := uuid.NewString()
+
+		responseTimer := time.AfterFunc(time.Duration(responseTimeout)*time.Millisecond, func() {
+			p.rpcLock.Lock()
+			delete(p.rpcPendingResponses, id)
+			p.rpcLock.Unlock()
+
+			select {
+			case errorCh <- utils.DataChannelRpcErrorFromBuiltInCodes(utils.DataChannelRpcResponseTimeout, "").PsrpcError():
+			default:
+			}
+		})
+		ackTimer := time.AfterFunc(utils.DataChannelRpcMaxRoundTripLatency, func() {
+			p.rpcLock.Lock()
+			delete(p.rpcPendingAcks, id)
+			delete(p.rpcPendingResponses, id)
+			p.rpcLock.Unlock()
+			responseTimer.Stop()
+
+			select {
+			case errorCh <- utils.DataChannelRpcErrorFromBuiltInCodes(utils.DataChannelRpcConnectionTimeout, "").PsrpcError():
+			default:
+			}
+		})
+
+		rpcRequest := &livekit.DataPacket{
+			Kind:                livekit.DataPacket_RELIABLE,
+			ParticipantIdentity: id,
+			Value: &livekit.DataPacket_RpcRequest{
+				RpcRequest: &livekit.RpcRequest{
+					Id:                id,
+					Method:            req.GetMethod(),
+					Payload:           req.GetPayload(),
+					ResponseTimeoutMs: responseTimeout - p.lastRTT,
+					Version:           1,
+				},
+			},
+		}
+		data, err := proto.Marshal(rpcRequest)
+		if err != nil {
+			ackTimer.Stop()
+			responseTimer.Stop()
+			errorCh <- psrpc.NewError(psrpc.Internal, err)
+			return
+		}
+
+		// using RPC ID as the unique ID for server to identify the response
+		err = p.SendDataMessage(livekit.DataPacket_RELIABLE, data, livekit.ParticipantID(id), 0)
+		if err != nil {
+			ackTimer.Stop()
+			responseTimer.Stop()
+			errorCh <- psrpc.NewError(psrpc.Internal, err)
+			return
+		}
+
+		p.rpcLock.Lock()
+		p.rpcPendingAcks[id] = &utils.DataChannelRpcPendingAckHandler{
+			Resolve: func() {
+				ackTimer.Stop()
+			},
+			ParticipantIdentity: req.GetDestinationIdentity(),
+		}
+		p.rpcPendingResponses[id] = &utils.DataChannelRpcPendingResponseHandler{
+			Resolve: func(payload string, error *utils.DataChannelRpcError) {
+				responseTimer.Stop()
+				if _, ok := p.rpcPendingAcks[id]; ok {
+					p.rpcPendingAcks[id].Resolve()
+					ackTimer.Stop()
+				}
+
+				if error != nil {
+					errorCh <- error.PsrpcError()
+				} else {
+					resultCh <- payload
+				}
+			},
+			ParticipantIdentity: req.GetDestinationIdentity(),
+		}
+		p.rpcLock.Unlock()
+	}()
 }
